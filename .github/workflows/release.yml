@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (e.g. v1.0.0)
+        required: true
+        default: v1.0.0
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Package & Publish Release
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag and version
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TAG="${INPUT_TAG}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [[ -z "$TAG" ]]; then
+            echo "Error: release tag could not be resolved" >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved TAG=$TAG VERSION=$VERSION"
+
+      - name: Run Swift tests
+        run: swift test
+
+      - name: Build and package dual-arch release
+        env:
+          KEYMAPSTUDIO_VERSION: ${{ steps.meta.outputs.version }}
+        run: ./scripts/package_release.sh
+
+      - name: Verify release artifacts
+        run: |
+          for f in \
+            dist/KeyMapStudio-AppleSilicon-arm64.dmg \
+            dist/KeyMapStudio-AppleSilicon-arm64.zip \
+            dist/KeyMapStudio-Intel-x86_64.dmg \
+            dist/KeyMapStudio-Intel-x86_64.zip \
+            dist/SHA256SUMS.txt; do
+            if [[ ! -s "$f" ]]; then
+              echo "Missing or empty artifact: $f" >&2
+              exit 1
+            fi
+          done
+          lipo -info build/arm64/KeyMapStudio.app/Contents/MacOS/KeyMapStudio
+          lipo -info build/x86_64/KeyMapStudio.app/Contents/MacOS/KeyMapStudio
+          cat dist/SHA256SUMS.txt
+
+      - name: Generate bilingual release notes
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          cat > release_notes.md <<EOF
+          # KeyMapStudio ${TAG}
+
+          macOS 统一快捷键总控台、78 键实时可视化虚拟键盘、全局极速浮窗与跨层冲突中心。  
+          Unified macOS shortcut hub, interactive 78-key virtual keyboard, global Quick Overlay, and cross-layer conflict center.
+
+          ---
+
+          ## 📥 下载指南 / Download Guide
+
+          请根据您的 Mac 芯片架构选择对应安装包（推荐下载 `.dmg` 镜像，拖拽到 `Applications` 即可完成安装）：  
+          Choose the package matching your Mac chip (`.dmg` recommended; drag `KeyMapStudio.app` into `Applications`):
+
+          | 芯片架构 / Chip Architecture | 适用机型 / Supported Macs | 推荐安装包 / Recommended DMG | 压缩包备选 / ZIP Archive |
+          | --- | --- | --- | --- |
+          | **Apple Silicon (`arm64`)** | M1 / M2 / M3 / M4 系列 Mac | `KeyMapStudio-AppleSilicon-arm64.dmg` | `KeyMapStudio-AppleSilicon-arm64.zip` |
+          | **Intel (`x86_64`)** | 基于 Intel 处理器的 Mac | `KeyMapStudio-Intel-x86_64.dmg` | `KeyMapStudio-Intel-x86_64.zip` |
+
+          > 💡 不确定芯片类型？点击屏幕左上角 ** → 关于本机**：显示“Apple M1/M2/M3/M4”请选择 **Apple Silicon (`arm64`)**，显示“Intel”请选择 **Intel (`x86_64`)**。  
+          > Not sure which chip you have? Click ** → About This Mac**: choose **Apple Silicon (`arm64`)** for M-series Macs, or **Intel (`x86_64`)** for Intel Macs.
+
+          ---
+
+          ## 🛡️ 首次运行解除 Gatekeeper 隔离 / Gatekeeper First-Launch Tip
+
+          本开源版本使用 ad-hoc 本地签名发布，暂未经过 Apple Developer ID 公证。如果首次打开时系统提示“无法验证开发者”或“已损坏”，请将应用拖入 `/Applications` 后在终端运行以下命令解除隔离属性：  
+          This open-source release is ad-hoc signed (not notarized with an Apple Developer ID). If macOS blocks the first launch, drag the app to `/Applications` and run:
+
+          ```bash
+          xattr -cr /Applications/KeyMapStudio.app
+          ```
+
+          ---
+
+          ## ✨ 核心亮点 / Highlights
+
+          - **全局极速浮窗 / Global Quick Overlay (`⌥⌘K`)**：在任意应用中按下 `⌥⌘K` 即时呼出无焦点悬浮面板，自动扫描当前前台应用菜单快捷键并支持修饰键胶囊过滤与行内改键。
+          - **五层快捷键聚合 / 5-Layer Shortcut Hub**：统一管理 macOS 系统快捷键（53 项内置目录 + `activateSettings -u` 即时生效）、应用菜单 (`NSUserKeyEquivalents`)、开发工具（VS Code / Cursor / Antigravity / iTerm2 / Raycast / Obsidian）、`hidutil` 硬件单键映射与 `CGEventTap` 组合键映射。
+          - **交互式 78 键虚拟键盘 / Interactive 78-Key Virtual Keyboard**：物理按住 `⌘/⌥/⌃/⇧` 实时联动高亮或锁定修饰键组合，按来源五色区分与红点标示冲突。
+          - **跨层全局冲突中心 / Cross-Layer Conflict Center**：按高危 (`Critical`)、警告 (`Warning`) 与提示 (`Info`) 分级检测并支持一键改键、禁用或恢复默认，同时避免不同应用间菜单热键误报。
+          - **快照备份与迁移 / Snapshot Backup & Migration**：支持创建完整基线快照、五域差异对比、一键回滚与 JSON 导入/导出。
+
+          ---
+
+          ## 🔐 SHA256 Checksums
+
+          | File | SHA-256 |
+          | --- | --- |
+          EOF
+          while read -r hash file; do
+            echo "| \`${file}\` | \`${hash}\` |" >> release_notes.md
+          done < dist/SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            dist/KeyMapStudio-AppleSilicon-arm64.dmg \
+            dist/KeyMapStudio-AppleSilicon-arm64.zip \
+            dist/KeyMapStudio-Intel-x86_64.dmg \
+            dist/KeyMapStudio-Intel-x86_64.zip \
+            dist/SHA256SUMS.txt \
+            --title "KeyMapStudio $TAG" \
+            --notes-file release_notes.md \
+          || {
+            gh release upload "$TAG" \
+              dist/KeyMapStudio-AppleSilicon-arm64.dmg \
+              dist/KeyMapStudio-AppleSilicon-arm64.zip \
+              dist/KeyMapStudio-Intel-x86_64.dmg \
+              dist/KeyMapStudio-Intel-x86_64.zip \
+              dist/SHA256SUMS.txt \
+              --clobber
+            gh release edit "$TAG" \
+              --title "KeyMapStudio $TAG" \
+              --notes-file release_notes.md
+          }
